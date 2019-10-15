@@ -1,0 +1,76 @@
+LiveData+Retrofit使用：
+
+移除掉RxJava,使用LiveData。
+步骤：
+将Retrofit的Call请求适配成LiveData,需要自定义CallAdapterFactory。
+
+根据接口响应格式不同，对应的适配工厂会有所区别，下面以wanandroid的api为例子。
+它的响应格式：
+{
+    data:[],//或者{}
+    errorCode:0,
+    errorMsg:""
+}
+
+定义一个通用的响应实体ApiResponse
+ApiResponse.java
+
+然后定义对应的LiveDataCallAdapterFactory.java
+
+然后在LiveDataCallAdapter将Retrofit的Call对象适配成LiveData
+LiveDataCallAdapter.java
+
+以首页banner接口(www.wanandroid.com/banner/json)为例，完成第一个请求。
+新建一个WanApi接口，加入Banner列表api，以及Retrofit初始化方法,
+为方便查看http请求和响应，加入了okhttp自带的日志拦截器。
+
+BannerVO实体,在MainActivity中发起请求。
+
+//////////////////////////////////////////////////////////////////////////////
+2.LiveData的map与switchMap操作
+LiveData可以通过Transformations的map/switchMap操作，将一个LiveData转成另一种类型的LiveData.
+效果与RxJava的map和flatmap操作符类似。
+
+map是基于泛型类型的转换。
+switchMap是返回一个新的LiveData。
+
+以banner请求为例，我们将map和switchMap应用到实际场景中：
+1: 为了能够手动控制请求，我们需要一个refreshTrigger触发变量，
+当这个变量被设置为true时，通过switchMap生成一个新的LiveData用作请求banner。
+
+2.为了展示banner，我们通过map将ApiResponse转换成最终关心的数据是List<BannerVO>
+
+///////////////////////////////////////////////////////////////
+三、LiveData与ViewModel结合
+为了将LiveData与Activity解耦，我们通过ViewModel来管理这些LiveData。
+HomeVM.java
+activity_main_viewmodel.xml
+
+然后在MainActivity onCreate()完成Banner初始化,
+test3()通过监听ViewModel中的banners实现轮播图片的展示。
+
+
+
+
+//////////////////////////////////////////////////////////////
+四、SwipeRefreshLayout 加载回调
+
+
+请求网络过程中，必不可少的是加载进度的展示。
+这里我们列举两种常用的的加载方式，一种在布局中的进度条(如SwipeRefreshLayout)，另一种是加载对话框。
+
+为了控制加载进度条显示隐藏，我们在HomeVM中添加loading变量，
+在调用loadData时通过loading.value=true控制进度条的显示，在map中的转换函数中控制进度的隐藏
+activity_main_viewmodel_2.xml
+HomeVM_SwipeRefresh.java
+
+//////////////////////////////////////////////
+五、分页请求
+分页请求是另个一常用请求，它的请求状态就比刷新数据多了几种。
+以wanandroid首页文章列表api为例，我们在HomeVM中加入page,refreshing,moreLoading，hasMore变量控制分页请求
+用SmartRefreshLayout作为分页组件，来实现WanAndroid首页文章列表数据的展示。
+
+绑定SmartRefreshLayout属性和事件
+通过@BindingAdapter注解，将绑定SmartRefreshLayout属性和事件封装一样，便于我们在布局文件通过databinding控制它。
+
+新建一个CommonBinding.kt文件，注意在gradle中引入kotlin-kapt

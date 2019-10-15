@@ -1,0 +1,197 @@
+一、LiveData是如何观察组件生命周期变化的呢？
+通过调用查看LiveData的observer方法源码来注册观察者，
+
+此方法使用MainThread注解修饰，表示运行在主线程中。
+@MainThread
+public void observe(@NonNull LifecycleOwner owner, @NonNull Observer<T> observer) 方法：
+
+ if (owner.getLifecycle().getCurrentState() == DESTROYED) {  //注释1
+            // ignore 此处直接判断了当前Lifecycle
+            return;
+        }
+LifecycleBoundObserver wrapper = new LifecycleBoundObserver(owner, observer); //注释2
+ObserverWrapper existing = mObservers.putIfAbsent(observer, wrapper);  //注释3
+
+owner.getLifecycle().addObserver(wrapper);//注释4
+
+//注释1，owner就是注册时传递过来的组件，比如Activity，获取组件当前的状态，
+如果状态为DESTROYED,那么直接就return了，说明DESTROYED状态的组件不允许被注册。
+
+//注释2，新建了一个LifecycleBoundObserver包装类，将owner和observer传了进去。
+
+//注释3.将observer存储到SafeIterableMap<Observer<T>, ObserverWrapper> mObservers =
+                              new SafeIterableMap<>();集合中。
+putIfAbsent方法和put方法的区别：如果传入的key对应的value已经存在，就返回存在的value,不进行替换。
+如果不存在，就添加key和value,返回null。
+如果等于null,在注释4处会将LifecycleBoundObserver添加到Lifecycle中完成注册，
+这样当调用LiveData的observer方法时，实际上是LiveData内部完成了Lifecycle的观察者的添加，
+这样LiveData自然也就有了观察组件生命周期的能力。
+
+1.1  LifecycleBoundObserver是LiveData的内部类。
+此类继承了ObserverWrapper类（ObserverWrapper类是Observer的包装类，其中定义了一些状态信息字段等）。
+类内部重写了shouldBeActive方法，用于判断当前传入的组件是否是Active的，
+Active状态包括START和RESUMED状态。
+
+2、如果一个观察者处于DESTROYED状态，它为什么会收不到通知呢？
+2.1  LifecycleBoundObserver实现了GenericLifecycleObserver接口，当组件状态发生变化时，会调用
+onStateChanged方法，当组件处于DESTROYED状态时，就会调用removeObserver移除观察者。
+接着调用activeStateChange方法：
+根据Active状态和处于Active状态的组件的数量，来对onActive方法和onInactive方法回调，
+这两个方法用于扩展LiveData对象。
+if(mActive){
+    dispatchingValue(this); //注释1
+}
+注释1处，如果是Active状态，会调用dispatchingValue方法，并将自身传进去。
+
+dispatchingValue方法：
+根据mDispatchingValue标记是否处于分发状态中，如果处于true,表示当前分发无效，
+直接return。
+
+一路调用过来，ObserverWrapper是不为null的。
+但无论哪种情况，都会调用considerNotify方法，这是通知观察者的方法。
+considerNotify方法内部做了判断：
+1.如果observerWrapper的mActive值不为true,直接return。
+2.如果observer当前对应组件的状态不是Active,就会再次调用activeStateChanged，并传入false,
+activeStateChanged方法内部会再次判断是否执行onActive或onInactive方法回调。
+
+1.3 postValue/setValue方法分析
+这两个方法用于更新数据。
+postValue方法市集上就将setValue方法切换到主线程调用。
+@MainThread //表示setValue是运行在主线程中
+setValue(T value)  方法内部调用了dispatchingValue方法。
+无论是LiveData的observe方法还是LiveData的postValue/setValue方法都会调用dispatchingValue方法。
+
+//////////////////////////////////////////////////////////////////////////////////////////////
+
+
+3、Transformations的map方法其内部进行了什么操作？
+方法作用：用于在LiveData对象分发给观察者之前对其中存储的值进行更改。
+map方法运行在主线程中，方法内部创建了MediatorLiveData,紧接着调用了它的addSource方法。
+
+MediatorLiveData.addSource()方法：
+方法内部将传进来的LiveData和onChanged封装到Source类中，
+内部调用了Source的plug方法--》Source类中的plug方法会调用LiveData的observerForever方法，
+observerForever方法内部使用AlwaysActiveObser来对Observer进行包装，
+紧接着调用AlwaysActiveObserver的activeStateChanged方法，其内部实际调用的是ObserverWrapper
+的activieStateChanged方法。
+
+AlwaysActiveObserver是LiveData的内部类，它继承自ObserverWrapper，
+AlwaysActiveObserver是LiveData的内部类和ObserverWrapper的区别就是，它是永远处于Active状态的。
+
+
+
+/////////////////////////////////////ViewModel的原理////////////////////////////
+理解ViewModel原理从案例viewmodel包下的代码入手：
+MyViewModel model=ViewModelProviders.of(this).get(MyViewModel.class);
+
+一、ViewModelProviders.of(this) 方法：
+这里this传递的是当前activity，也可传递fragment,ViewModelProviders.of()有多个构造方法。
+
+ViewModelProviders.of(this) 最终调用如下方法：
+@MainThread
+public static ViewModelProvider of(@NonNull FragmentActivity activity, Factory factory){
+    Application application = checkApplication(activity);//注释1
+    if (factory == null) {
+        factory = ViewModelProvider.AndroidViewModelFactory.getInstance(application);//注释2
+    }
+    return new ViewModelProvider(activity.getViewModelStore(), factory);
+}
+
+注释1处内部调用activity.getApplication来返回该Activity对应的Application。
+如果传递的是fragment,则是fragment.getActivity()返回该fragment对应所在的Activity。
+
+注释2处的代码创建AndroidViewModelFactory实例，
+最后会新建一个ViewModelProvider,将factory作为参数传递。
+
+
+AndroidViewModelFactory类：
+AndroidViewModelFactory是一个单例，讲这个类前，
+需要知道ViewModel类本身是一个抽象类，我们通过继承ViewModel，来实现自定义ViewModel，
+那么AndroidViewModelFactory的create方法的作用，就是通过反射生成ViewModel的实现类。
+接着回头看ViewModelProvider.get方法。
+
+二、ViewModelProvider.get()方法：
+方法内部：
+//得到生成的ViewModel实现类的类名，对类名进行拼接
+String canonicalName = modelClass.getCanonicalName();//1
+
+//拼接的全类名为：DEFAULT_KEY+canonicalName
+DEFAULT_KEY==”androidx.lifecycle.ViewModelProvider.DefaultKey”
+根据这个key值从ViewModelStore获取ViewModel(ViewModel实现类)。
+如果ViewModel能转换为modelClass类的对象，直接返回该ViewModel.
+否则通过Factory创建一个ViewModel并存储到ViewModelStore，
+至此，ViewModel实现类创建完成，开发者可以开始调用。
+
+
+
+////////////////////////////////////Lifecycle原理/////////////////////////////
+一、Lifecycle的生命周期事件和状态
+Lifecycle是一个抽象类，其内部包括了添加和移除观察者的方法，还有Event和State枚举。
+可以看到Event中的事件和Activity的生命周期几乎是对应的，除了ON_ANY，它可用于匹配所有事件。
+
+Lifecycle使用了两个枚举来跟踪其关联组件的生命周期状态，分别是Event和State。
+State指的是Lifecycle的生命周期所处的状态。
+Event代表Lifecycle生命周期对应的事件，这些事件会映射到Activity和Fragment中的生命周期回调事件中。
+
+
+二、Lifecycle如何观察Activity和Fragment的生命周期
+在Android sdk 26及其之后的版本，Activity和Fragment默认实现了LifecycleOwner接口。
+Lifecycle可理解为观察者。
+Android8.0时，FragmentActivity继承自SupportActivity,
+而在Android 9.0，FragmentActivity继承自ComponentActivity。
+两者区别不大，但都实现了LifecycleOwner接口。
+
+在内部创建了LifecycleRegistry，LifecycleRegistry是Lifecycle的实现类。
+因为在父级Activity实现了LifecycleOwner接口的getLifeCycle方法并将LifecycleRegistry返回。
+
+@Override
+protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        ReportFragment.injectIfNeededIn(this);//2
+}
+@Override
+protected void onSaveInstanceState(Bundle outState) {
+        mLifecycleRegistry.markState(Lifecycle.State.CREATED);//注释3
+        super.onSaveInstanceState(outState);
+}
+
+
+注释3处，将Lifecycle的State设置为CREATED。
+正常来说应该在ComponentActivity的各个生命周期方法中改变Lifecycle的State，
+显然在ComponentActivity中没有做这些，而是将这个任务交给了ReportFragment，
+注释2处的将ComponentActivity注入到ReportFragment中。
+
+
+frameworks/support/lifecycle/runtime/src/main/java/androidx/lifecycle/ReportFragment.java
+在ReportFragment类中：
+onStart方法中会调用注释1处的dispatch方法。
+在dispatch方法中，判断Activity是否实现了LifecycleRegistryOwner接口，
+LifecycleRegistryOwner继承了LifecycleOwner接口，这两个接口不同的是，
+LifecycleRegistryOwner定义的getLifecycle方法返回的是LifecycleRegistry类型，
+而LifecycleOwner定义的getLifecycle方法返回的是Lifecycle类型。
+如果Activity实现了LifecycleOwner接口，会调用LifecycleRegistry的handleLifecycleEvent方法。
+
+((LifecycleRegistry) lifecycle).handleLifecycleEvent()方法：
+public void handleLifecycleEvent(@NonNull Lifecycle.Event event) {
+    State next = getStateAfter(event);
+    moveToState(next);
+}
+
+getStateAfter方法会获取“即将的事件” ：当前事件执行后，即将会处于什么事件
+比如当前执行了ON_CREATE事件或者ON_STOP事件，那么状态就会处于CREATED。
+回到handleLifecycleEvent方法，其内部还会调用moveToState方法。
+如果当前所处的状态和即将要处于的状态一样就不做任何操作。
+
+sync方法中会根据当前状态和mObserverMap中的eldest和newest的状态做对比 ，
+判断当前状态是向前还是向后，比如由STARTED到RESUMED是状态向前，
+反过来就是状态向后，这个不要和Activity的生命周期搞混。
+向前还是向后的代码大同小异，这里以向后为例。
+
+
+
+总结：Lifecycle监听Activity或Fragment生命周期方式与Glide的方式一样，
+也是使用在宿主Activity之上创建一个Fragment，在该Fragment的生命周期之上调用自身对应监听方法。
+
+
+
+
